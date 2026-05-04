@@ -1,0 +1,11 @@
+Jira ID,Summary,Description,Steps,Expected Result,Priority
+PROJ-101,Login with valid credentials,Verify that a user can login with valid email and password,"1. Go to login page\n2. Enter valid email\n3. Enter valid password\n4. Click login",User should be redirected to dashboard,High
+PROJ-102,Login with invalid password,Verify that login fails with incorrect password,"1. Go to login page\n2. Enter valid email\n3. Enter invalid password\n4. Click login",Error message should be displayed,Medium
+PROJ-103,Logout functionality,Verify that user can logout,"1. Login to app\n2. Click logout button",User should be redirected to landing page,High
+PROJ-104,Forgot password,Verify forgot password link works,"1. Go to login page\n2. Click forgot password",Password reset email should be sent,Low
+PROJ-105,Profile update,Verify profile information update,"1. Go to profile\n2. Edit name\n3. Click save",Profile updated successfully message,Medium
+PROJ-106,Search functionality,Verify search works for products,"1. Enter 'iPhone' in search\n2. Press Enter",Relevant search results should appear,High
+PROJ-107,Add to cart,Verify adding item to cart,"1. Open product page\n2. Click Add to Cart",Cart count should increase,High
+PROJ-108,Checkout process,Verify checkout workflow,"1. Go to cart\n2. Click Checkout\n3. Enter details",Order confirmation page,Critical
+PROJ-109,Delete item from cart,Verify item removal,"1. Go to cart\n2. Click remove icon",Item should be removed from cart,Low
+PROJ-110,Password change,Verify password change in settings,"1. Go to settings\n2. Enter old/new password\n3. Click save",Password changed successfully,Medium
