@@ -5,7 +5,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-import uuid
+from dotenv import load_dotenv
 
 # LangChain and RAG components
 from langchain_community.document_loaders import DataFrameLoader
@@ -14,6 +14,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from groq import Groq
 from flashrank import Ranker, RerankRequest
+
+load_dotenv()
 
 app = FastAPI()
 
@@ -46,6 +48,41 @@ class QueryResponse(BaseModel):
     original_chunks: List[dict]
     reranked_chunks: List[dict]
     stats: dict
+
+
+# Feature keywords for diverse retrieval
+FEATURE_KEYWORDS = [
+    "login", "logout", "password", "forgot password", "reset",
+    "profile", "account", "settings",
+    "search", "filter",
+    "cart", "add to cart", "remove", "checkout", "payment", "order",
+    "registration", "signup", "sign up",
+    "navigation", "menu", "dashboard",
+    "notification", "email", "message",
+    "upload", "download", "import", "export",
+]
+
+
+def extract_search_queries(user_query: str) -> List[str]:
+    """Extract targeted search terms from the user query to improve retrieval diversity."""
+    q = user_query.lower()
+
+    # If the query asks for "each module/feature" or "per feature", use feature keywords
+    if any(phrase in q for phrase in ["each module", "each feature", "per module", "per feature",
+                                        "1 test case for each", "one test case for each",
+                                        "all modules", "all features", "list all", "group by"]):
+        return FEATURE_KEYWORDS + [user_query]
+
+    # Check if query mentions specific features
+    mentioned = [kw for kw in FEATURE_KEYWORDS if kw in q]
+    if mentioned:
+        return mentioned + [user_query]
+
+    # Default: use the query as-is
+    return [user_query]
+
+
+RELEVANCE_THRESHOLD = 0.08
 
 @app.get("/")
 async def root():
@@ -186,19 +223,33 @@ async def query_rag(request: QueryRequest):
             detail="GROQ_API_KEY not found. Please provide it in the settings."
         )
 
-    # 1. Retrieval
-    docs = vector_db.similarity_search(request.query, k=20) # Get more initially
+    # 1. Retrieval - use extracted search queries for diversity
+    search_queries = extract_search_queries(request.query)
     
-    # Deduplicate docs by content
+    all_docs = []
     seen_content = set()
-    unique_docs = []
-    for d in docs:
-        if d.page_content not in seen_content:
-            unique_docs.append(d)
-            seen_content.add(d.page_content)
+    
+    # For "per feature" queries, search with feature keywords to get broad coverage
+    if len(search_queries) > 1:
+        for sq in search_queries[:10]:  # limit to first 10 queries
+            batch = vector_db.similarity_search(sq, k=5)
+            for d in batch:
+                if d.page_content not in seen_content:
+                    all_docs.append(d)
+                    seen_content.add(d.page_content)
+    else:
+        all_docs = vector_db.similarity_search(search_queries[0], k=30)
+        # Deduplicate
+        uniq = []
+        seen = set()
+        for d in all_docs:
+            if d.page_content not in seen:
+                uniq.append(d)
+                seen.add(d.page_content)
+        all_docs = uniq
     
     original_chunks = [
-        {"content": d.page_content, "metadata": d.metadata} for d in unique_docs[:10]
+        {"content": d.page_content, "metadata": d.metadata} for d in all_docs
     ]
     
     # 2. Re-ranking
@@ -208,25 +259,43 @@ async def query_rag(request: QueryRequest):
     rerank_request = RerankRequest(query=request.query, passages=passages)
     results = rnk.rerank(rerank_request)
     
+    # Filter by relevance threshold and keep top results
+    filtered_results = [r for r in results if float(r['score']) >= RELEVANCE_THRESHOLD]
+    if not filtered_results:
+        # Fallback: keep at least the top 3 even if below threshold
+        filtered_results = results[:3]
+    
     reranked_chunks = [
-        {"content": r['text'], "score": float(r['score']), "metadata": r['meta']} for r in results[:5]
+        {"content": r['text'], "score": float(r['score']), "metadata": r['meta']} for r in filtered_results
     ]
     
     # 3. Generation
     try:
         client = Groq(api_key=current_key)
-        context = "\n\n".join([c["content"] for c in reranked_chunks])
+        context = "\n\n---\n\n".join([c["content"] for c in reranked_chunks])
         
-        prompt = f"""You are an advanced RAG assistant. Use the following context to answer the user's question. 
-Context:
+        prompt = f"""You are a test case management expert. Analyze the provided test cases and answer the user's question.
+
+Context (test cases from our database):
 {context}
 
-Question: {request.query}
+User Question: {request.query}
+
+Instructions:
+- Each test case has fields: Jira ID, Summary, Description, Steps, Expected Result, Priority
+- Based on the Summary and Description, identify which feature/module each test case belongs to (e.g., Login, Search, Cart, Checkout, Profile, Settings, Registration, Payment, etc.)
+- If the user asks for "one test case per feature/module" or similar, group ALL test cases by their inferred feature, then pick the best representative for each group
+- Format your answer with clear headings for each feature group
+- Include Jira ID, Summary, Priority, and Expected Result for each test case listed
+- If you cannot determine a feature for a specific test case, list it under "Other / Uncategorized"
+- Use ALL test cases from the context — do not leave any out — do not invent test cases
+- If no test cases are provided in context, say "No test cases found in the database. Please upload a file first."
+
 Answer:"""
 
         chat_completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are an expert Test Case Management assistant. Analyze the provided test cases and answer the user's query comprehensively. If the user asks for specific types of test cases (like 'MFA' or 'Login'), summarize the relevant ones you find in the context. If no direct match exists, provide the most related information available in the data. Always be helpful and avoid saying you cannot find information unless the context is truly empty."},
+                {"role": "system", "content": "You are an expert Test Case Management assistant. Your job is to analyze the provided test case context and answer queries comprehensively. Always group test cases by their inferred feature/module when the user asks for organization by feature. Infer features from the Summary field (e.g., 'Login' → Login feature, 'Add to cart' → Cart feature). Always include Jira IDs in your answer. If the context is empty, politely state that no test cases are available. Never invent test cases."},
                 {"role": "user", "content": prompt},
             ],
             model=request.model or "llama-3.3-70b-versatile",
@@ -240,9 +309,11 @@ Answer:"""
         "original_chunks": original_chunks,
         "reranked_chunks": reranked_chunks,
         "stats": {
-            "initial_retrieval_count": len(original_chunks),
+            "initial_retrieval_count": len(all_docs),
+            "unique_chunks": len(original_chunks),
             "reranked_count": len(reranked_chunks),
-            "model_used": request.model or "llama-3.3-70b-versatile"
+            "model_used": request.model or "llama-3.3-70b-versatile",
+            "search_queries_used": search_queries[:5]
         }
     }
 
